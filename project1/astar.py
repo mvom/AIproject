@@ -1,5 +1,5 @@
-from pacman_module.game import Agent
-from pacman_module.pacman import Directions
+# Importing necessary modules
+from pacman_module.game import Agent, Directions
 from pacman_module.util import PriorityQueue, manhattanDistance
 
 
@@ -11,74 +11,84 @@ def key(state):
         state: a game state. See API or class `pacman.GameState`.
 
     Returns:
-        A hashable key tuple.
+        A hashable key tuple representing the current state.
     """
     return (
         state.getPacmanPosition(),
         state.getFood(),
         tuple(state.getCapsules())
-    )  # Generating a unique key for the state
+    )
 
 
 def cost_function(state, next_state):
     """
-    Calculates the transition cost between Pac-Man game states.
+    Given a pacman game state, returns a value based on the
+    cost of moving from one state to another.
 
     Arguments:
-        state, next_state: a game state. See API or class `pacman.GameState`.
+        state: a game state. See API or class `pacman.GameState`.
+        next_state: the next game state.
 
     Returns:
         An integer value for the cost.
     """
+    current_capsules = state.getCapsules()
+    next_state_capsules = next_state.getCapsules()
 
-    return 6 if state.getCapsules() != next_state.getCapsules() else 1
+    # Cost for moving and eating a capsule
+    if current_capsules != next_state_capsules:
+        return 6
+    else:
+        return 1  # Cost for moving
 
 
 def heuristic_function(state):
-    """Heuristic function for Pacman game state."""
+    """
+    Calculates the Manhattan distances to the closest food positions.
+
+    Arguments:
+        state: a game state. See API or class `pacman.GameState`.
+
+    Returns:
+        An integer value that denotes the heuristic value for the position.
+    """
     current_position = state.getPacmanPosition()
     food_positions = state.getFood()
+    distances = [
+        manhattanDistance((x, y), current_position)
+        for x in range(food_positions.width)
+        for y in range(food_positions.height)
+        if food_positions[x][y]
+    ]
 
-    # Calculate the distance to the closest food using Euclidean distance
-    closest_food_distance = float('inf')
-    for x in range(food_positions.width):
-        for y in range(food_positions.height):
-            if food_positions[x][y]:
-                distance = manhattanDistance((x, y), current_position)
-                if distance < closest_food_distance:
-                    closest_food_distance = distance
-
-    # Calculate the distance to the closest capsule (if any)
-    capsules = state.getCapsules()
-    closest_capsule_distance = float('inf')
-    for capsule in capsules:
-        distance = manhattanDistance(capsule, current_position)
-        if distance < closest_capsule_distance:
-            closest_capsule_distance = distance
-
-    return (max(closest_food_distance, closest_capsule_distance)
-            if closest_food_distance != float('inf') else 0)
+    if not distances:
+        return 0
+    else:
+        return max(distances)
 
 
 class PacmanAgent(Agent):
-    """Pacman agent based on A*."""
+    """
+    Pacman agent based on an A* approach,
+    decreasing by moving to the next position,
+    and defining for each state the Euclidean distance to the nearest food.
+    """
 
     def __init__(self):
-
         super().__init__()
-        self.moves = []  # List to store the computed moves
+        self.moves = None
 
     def get_action(self, state):
-        """Given a Pacman game state, returns a legal move.
+        """
+        Given a Pacman game state, returns a legal move.
 
         Arguments:
             state: a game state. See API or class `pacman.GameState`.
 
-        Return:
+        Returns:
             A legal move as defined in `game.Directions`.
         """
-
-        if not self.moves:
+        if self.moves is None:
             self.moves = self.astar(state)
 
         if self.moves:
@@ -87,12 +97,12 @@ class PacmanAgent(Agent):
             return Directions.STOP
 
     def astar(self, state):
-        """Given a pacman game state, returns a list of legal moves
-            to solve the search layout. These moves are founded by a bfs
-            search algortihm.
+        """
+        Given a pacman game state, returns a list of legal moves
+        to solve the search layout based on the A* algorithm.
 
         Arguments:
-            state: a game state, See API or class pacman.GameState`.
+            state: a game state. See API or class `pacman.GameState`.
 
         Returns:
             A list of legal moves.
@@ -102,23 +112,24 @@ class PacmanAgent(Agent):
         fringe.push((state, path, 0.), 0.)
         closed = set()
 
-        while not fringe.isEmpty():
-            # Pop the state with the lowest priority from the fringe
-            current, path, cost = fringe.pop()[1]
+        while True:
+            if fringe.isEmpty():
+                return []
+
+            _, (current, path, cost) = fringe.pop()
 
             if current.isWin():
-                return path  # Return the path if the goal state is reached
+                return path
 
             current_key = key(current)
 
             if current_key in closed:
-                continue  # Skip the state if it has already been visited
-
+                continue
             closed.add(current_key)
-            successors = current.generatePacmanSuccessors()
-            for successor, action in successors:
+
+            for successor, action in current.generatePacmanSuccessors():
                 successor_cost = cost + cost_function(current, successor)
                 fringe.push((successor, path + [action], successor_cost),
                             successor_cost + heuristic_function(successor))
 
-        return []  # Return an empty path if no path is found
+        return path
