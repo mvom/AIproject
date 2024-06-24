@@ -1,6 +1,7 @@
 import numpy as np
-
 from pacman_module.game import Agent, Directions, manhattanDistance
+from scipy.stats import binom
+from pacman_module.util import Queue
 
 
 class BeliefStateAgent(Agent):
@@ -16,10 +17,8 @@ class BeliefStateAgent(Agent):
         self.ghost = ghost
 
     def transition_matrix(self, walls, position):
-        """Builds the transition matrix
-
-            T_t = P(X_t | X_{t-1})
-
+        """
+        Builds the transition matrix T_t = P(X_t | X_{t-1})
         given the current Pacman position.
 
         Arguments:
@@ -32,30 +31,32 @@ class BeliefStateAgent(Agent):
             the ghost to move from (k, l) to (i, j).
         """
         width, height = walls.width, walls.height
-        ghost = self.ghost
+
+        # Initialize the transition model
         trans_model = np.zeros((width, height, width, height))
 
-        fear_value = {"fearless": 1, "afraid": 2, "terrified": 8}.get(ghost, 0)
+        # Factor based on ghost's state
+        ghost_state_factors = {"fearless": 1, "afraid": 2, "terrified": 8}
+        f = ghost_state_factors.get(self.ghost, 0)
 
         for w in range(width):
             for h in range(height):
-                # adjacent cells of (w, h)
-                next_step = [(w - 1, h), (w + 1, h), (w, h - 1), (w, h + 1)]
+                if walls[w][h]:
+                    continue
 
-                # distance between Pacman and the original case (w, h)
-                current_dist = manhattanDistance((w, h), position)
+                # Adjacent cells of (w, h)
+                next_steps = [(w-1, h), (w+1, h), (w, h-1), (w, h+1)]
+                dist = manhattanDistance((w, h), position)
 
-                for i, j in next_step:
-                    if walls[w][h] or walls[i][j]:
-                        continue
-
-                    else:
+                for i, j in next_steps:
+                    if 0 <= i < width and 0 <= j < height and not walls[i][j]:
                         next_dist = manhattanDistance((i, j), position)
+                        if next_dist > dist:
+                            trans_model[i, j, w, h] = f
+                        else:
+                            trans_model[i, j, w, h] = 1
 
-                        value = fear_value if next_dist > current_dist else 1
-                        trans_model[i, j, w, h] = value
-
-                # normalization of the matrix along the last two dimensions
+                # Normalize the matrix for the current cell (w, h)
                 norm = np.sum(trans_model[:, :, w, h])
                 if norm:
                     trans_model[:, :, w, h] /= norm
@@ -63,12 +64,10 @@ class BeliefStateAgent(Agent):
         return trans_model
 
     def observation_matrix(self, walls, evidence, position):
-        """Builds the observation matrix
-
-            O_t = P(e_t | X_t)
-
-        given a noisy ghost distance evidence e_t and the current Pacman
-        position.
+        """
+        Builds the observation matrix O_t = P(e_t | X_t)
+        given a noisy ghost distance evidence
+        e_t and the current Pacman position.
 
         Arguments:
             walls: The W x H grid of walls.
@@ -78,25 +77,21 @@ class BeliefStateAgent(Agent):
         Returns:
             The W x H observation matrix O_t.
         """
-        # create matrix based off manhattanDistance
-        W = walls.width
-        H = walls.height
-        o = np.empty((W, H))
-        for i in range(W):
-            for j in range(H):
-                if manhattanDistance(position, (i, j)) == evidence:
-                    o[i][j] = 0.375  # value of binom(n,p)=np
-                elif manhattanDistance(position, (i, j)) == evidence - 1:
-                    o[i][j] = 0.250  # value of binom(n,p)=np-1
-                elif manhattanDistance(position, (i, j)) == evidence - 2:
-                    o[i][j] = 0.0625
-                elif manhattanDistance(position, (i, j)) == evidence + 1:
-                    o[i][j] = 0.250
-                elif manhattanDistance(position, (i, j)) == evidence + 2:
-                    o[i][j] = 0.0625
-                else:
-                    o[i][j] = 0
-        return o
+        width, height = walls.width, walls.height
+        binomial = binom(4, 0.5)
+        sensor_model = np.zeros((width, height))
+
+        pacman_x, pacman_y = position
+
+        for w in range(width):
+            for h in range(height):
+                if not walls[w][h]:  # Skip walls
+                    # Manhattan distance
+                    dist = abs(w - pacman_x) + abs(h - pacman_y)
+                    noise = evidence - dist
+                    sensor_model[w, h] = binomial.pmf(2 + noise)
+
+        return sensor_model
 
     def update(self, walls, belief, evidence, position):
         """Updates the previous ghost belief state
@@ -118,16 +113,16 @@ class BeliefStateAgent(Agent):
         width = walls.width
         height = walls.height
 
-        trans_matrix = self.transition_matrix(walls, position)
-        obser_matrix = self.observation_matrix(walls, evidence, position)
+        T = self.transition_matrix(walls, position)
+        Obs = self.observation_matrix(walls, evidence, position)
 
         new_belief = np.zeros((width, height))
-        m = np.zeros((width, height))
+        s = np.zeros((width, height))
 
         for w in range(width):
             for h in range(height):
-                m[w][h] = np.sum(trans_matrix[w, h, :, :] * belief)
-                new_belief[w, h] = m[w, h] * obser_matrix[w, h]
+                s[w][h] = np.sum(T[w, h, :, :] * belief)
+                new_belief[w, h] = s[w, h] * Obs[w, h]
 
         norm = np.sum(new_belief)
         if norm != 0:
@@ -158,7 +153,8 @@ class BeliefStateAgent(Agent):
                 new_beliefs[i] = np.zeros_like(beliefs[i])
             else:
                 new_beliefs[i] = self.update(
-                    walls, beliefs[i], evidences[i], position)
+                    walls, beliefs[i], evidences[i], position
+                    )
 
         return new_beliefs
 
@@ -169,39 +165,54 @@ class PacmanAgent(Agent):
     def __init__(self):
         super().__init__()
 
-    def Heuristic(self, direction, walls, beliefs, eaten, position):
+    def _bfs(self, start, goal, walls):
+        """
+        Perform Breadth-First Search (BFS) to
+        find the shortest path from start to goal.
 
-        if direction == str(Directions.NORTH):
-            next_pos = (position[0], position[1]+1)
-        if direction == str(Directions.EAST):
-            next_pos = (position[0]+1, position[1])
-        if direction == str(Directions.SOUTH):
-            next_pos = (position[0], position[1]-1)
-        if direction == str(Directions.WEST):
-            next_pos = (position[0]-1, position[1])
+        Arguments:
+            start: The starting position (x, y).
+            goal: The goal position (x, y).
+            walls: The W x H grid of walls.
 
-        current_best_val = 0
-        if walls[next_pos[0]][next_pos[1]]:
-            return -1
+        Returns:
+            A list of positions representing
+            the shortest path from start to goal.
+        """
+        original_pos = {
+            (start[0] - 1, start[1]): Directions.WEST,
+            (start[0] + 1, start[1]): Directions.EAST,
+            (start[0], start[1] - 1): Directions.SOUTH,
+            (start[0], start[1] + 1): Directions.NORTH
+        }
 
-        # get sum of probabilities across all ghosts
-        beliefs = np.nan_to_num(beliefs)
-        beliefs_sum = np.sum(beliefs, axis=0)
+        fringe = Queue()
+        fringe.push([start])
+        visited = set()
 
-        for w in range(walls.width):
-            for h in range(walls.height):
-                # heuristic as probability over distance
-                temp_pos = (w, h)
-                temp_distance = manhattanDistance(next_pos, temp_pos)
-                value = beliefs_sum[w][h] / (temp_distance*10+1)
-                # return the maximum value
-                if value > current_best_val:
-                    current_best_val = value
+        while not fringe.isEmpty():
+            path = fringe.pop()
+            current = path[-1]
 
-        return current_best_val
+            if current == goal:
+                return path
+
+            if current not in visited:
+                visited.add(current)
+
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    next_pos = (current[0] + dx, current[1] + dy)
+                    if not walls[next_pos[0]][next_pos[1]]:
+                        new_path = list(path)
+                        new_path.append(next_pos)
+                        fringe.push(new_path)
+
+        return []
 
     def _get_action(self, walls, beliefs, eaten, position):
         """
+        Given the current state of the game, returns a legal move for Pacman.
+
         Arguments:
             walls: The W x H grid of walls.
             beliefs: The list of current ghost belief states.
@@ -211,20 +222,38 @@ class PacmanAgent(Agent):
         Returns:
             A legal move as defined in `game.Directions`.
         """
-        current_best_val = 0
-        current_best_dir = Directions.STOP
+        nbr_g, width, height = beliefs.shape
+        dist = []
+        nearest_g_pos = []
 
-        # set of actions
-        directions = (Directions.NORTH, Directions.EAST,
-                      Directions.SOUTH, Directions.WEST)
+        for g in range(nbr_g):
+            if eaten[g]:
+                continue
 
-        for direction in directions:
-            value = self.Heuristic(
-                str(direction), walls, beliefs, eaten, position)
-            if value > current_best_val:
-                current_best_val = value
-                current_best_dir = direction
-        return current_best_dir
+            max_p = 0
+            for w in range(width):
+                for h in range(height):
+                    proba = beliefs[g, w, h]
+                    if proba > max_p:
+                        max_p = proba
+                        g_pos = (w, h)
+            nearest_g_pos.append(g_pos)
+            dist.append(manhattanDistance(position, g_pos))
+
+        ghost = dist.index(min(dist))
+        g_pos = nearest_g_pos[ghost]
+
+        path = self._bfs(position, g_pos, walls)
+        if len(path) > 1:
+            direction = path[1]
+            return {
+                (position[0] - 1, position[1]): Directions.WEST,
+                (position[0] + 1, position[1]): Directions.EAST,
+                (position[0], position[1] - 1): Directions.SOUTH,
+                (position[0], position[1] + 1): Directions.NORTH
+            }[direction]
+
+        return Directions.STOP
 
     def get_action(self, state):
         """Given a Pacman game state, returns a legal move.
@@ -237,7 +266,6 @@ class PacmanAgent(Agent):
         Returns:
             A legal move as defined in `game.Directions`.
         """
-
         return self._get_action(
             state.getWalls(),
             state.getGhostBeliefStates(),
